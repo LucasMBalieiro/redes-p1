@@ -18,6 +18,9 @@ def dados_recebidos(conexao, dados):
         return sair(conexao)
     print(conexao, dados)
 
+    if dados.strip().upper() == b'PING':
+        conexao.enviar(b':server PONG server :')
+
 
 def conexao_aceita(conexao):
     print(conexao, 'nova conexão')
