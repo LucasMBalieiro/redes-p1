@@ -16,10 +16,11 @@ def sair(conexao):
 def dados_recebidos(conexao, dados):
     if dados == b'':
         return sair(conexao)
-    print(conexao, dados)
 
-    if dados.strip().upper() == b'PING':
-        conexao.enviar(b':server PONG server :')
+    if dados.startswith(b'PING'):
+        conexao.enviar(b':server Pong server :' + dados.split(b' ', 1)[1])
+    
+    print(conexao, dados)
 
 
 def conexao_aceita(conexao):
