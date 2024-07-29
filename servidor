@@ -16,10 +16,34 @@ def sair(conexao):
 def dados_recebidos(conexao, dados):
     if dados == b'':
         return sair(conexao)
-    payload = dados.split(b' ', 1)[1]
+    
+    
+    if not hasattr(conexao, 'buffer'):
+        conexao.buffer = b''
 
-    if dados.startswith(b'PING'):
-        conexao.enviar(b':server PONG server :' + payload)
+    conexao.buffer += dados #adiciona todas as msgs no buffer pra dps separar bonitinho
+
+    while b'\n' in conexao.buffer: #vai rodar ate o /n final
+
+        if b'\r\n' in conexao.buffer:
+            dado, conexao.buffer = conexao.buffer.split(b'\r\n', 1)
+        else:
+            dado, conexao.buffer = conexao.buffer.split(b'\n', 1)
+
+        dado = dado.rstrip(b'\r')
+        
+        if dado:
+            # Process the message
+            parts = dado.split(b' ', 1)
+            if len(parts) > 1:
+                command, payload = parts[0], parts[1]
+            else:
+                command, payload = parts[0], b''
+
+            # Decode and handle the command
+            if command == b'PING':
+                # Send response
+                conexao.enviar(b':server PONG server :' + payload)
     
     print(conexao, dados)
 
