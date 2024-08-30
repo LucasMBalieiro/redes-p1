@@ -3,56 +3,173 @@ import asyncio
 from tcp import Servidor
 import re
 
+nicklist = {}
+canais = {}
+
 
 def validar_nome(nome):
     return re.match(br'^[a-zA-Z][a-zA-Z0-9_-]*$', nome) is not None
 
-
+    
 def sair(conexao):
-    print(conexao, 'conexão fechada')
-    conexao.fechar()
 
+    if hasattr(conexao, 'canais'):
+        for canal in conexao.canais:
+            if conexao in canais[canal.lower()]:
+                canais[canal.lower()].remove(conexao)
+            
+            for membro in canais[canal.lower()]:
+                membro.enviar(b':%s QUIT :Connection closed\r\n' % conexao.nick)
+            
+    if conexao.nick.lower() != b'':
+        del nicklist[conexao.nick.lower()]
+
+    conexao.fechar()
+    
 
 def dados_recebidos(conexao, dados):
     if dados == b'':
         return sair(conexao)
     
+    separador = re.compile(rb'''
+        (?<=
+        \r\n
+        )
+    ''', re.VERBOSE)
+    dados = [substring for substring in re.split(separador, dados)]
     
-    if not hasattr(conexao, 'buffer'):
-        conexao.buffer = b''
-
-    conexao.buffer += dados #adiciona todas as msgs no buffer pra dps separar bonitinho
-
-    while b'\n' in conexao.buffer: #vai rodar ate o /n final
-
-        if b'\r\n' in conexao.buffer:
-            dado, conexao.buffer = conexao.buffer.split(b'\r\n', 1)
-        else:
-            dado, conexao.buffer = conexao.buffer.split(b'\n', 1)
-
-        dado = dado.rstrip(b'\r')
+    
+    for dado in dados:
         
-        if dado:
-            # Process the message
-            parts = dado.split(b' ', 1)
-            if len(parts) > 1:
-                command, payload = parts[0], parts[1]
-            else:
-                command, payload = parts[0], b''
+        if dado.endswith(b'\r\n'):
+            dado = conexao.aux + dado
+            
+            if dado.startswith(b'PING'):
+                dado = dado[len(b'PING '):]
+                conexao.enviar(b':server PONG server :' + dado)
 
-            # Decode and handle the command
-            if command == b'PING':
-                # Send response
-                conexao.enviar(b':server PONG server :' + payload)
+
+            if dado.startswith(b'NICK'):
+                
+                nick = dado[len(b'NICK '):]
+                nick = nick[:-len(b'\r\n')]
+                
+                if validar_nome(nick):
+
+                    if nick.lower() in nicklist:
+                        
+                        if conexao.nick == b'':
+                            conexao.enviar(b':server 433 * %s :Nickname is already in use\r\n' % nick)
+                        
+                        else:
+                            conexao.enviar(b':server 433 %s %s :Nickname is already in use\r\n' % (conexao.nick, nick))
+                      
+                    else:
+                        if conexao.nick == b'':
+                            conexao.enviar(b':server 001 %s :Welcome\r\n' % nick)
+                            conexao.enviar(b':server 422 %s :MOTD File is missing\r\n' % nick)
+                            
+                        else:
+                            conexao.enviar(b':%s NICK %s\r\n' % (conexao.nick, nick))
+                            del nicklist[conexao.nick.lower()]
+                        
+                        nicklist[nick.lower()] = conexao
+                        conexao.nick = nick
+
+                else:
+                    conexao.enviar(b':server 432 * %s :Erroneous nickname\r\n' % nick)
+                    
+                    
+            if dado.startswith(b'PRIVMSG'):
+                privmsg = dado[len(b'PRIVMSG '):]
+                privmsg = privmsg[:-len(b'\r\n')] 
+                reciever, msg = privmsg.split(b' :', 1)
+                
+                
+                if reciever.startswith(b'#'):
+                    canal = reciever[len(b'#'):]
+                    
+                    if conexao in canais[canal.lower()]:
+                        for membro in canais[canal.lower()]:
+                            if membro != conexao:
+                                membro.enviar(b':%s PRIVMSG %s :%s\r\n' % (conexao.nick, b'#' + canal, msg))
+                elif reciever.lower() in nicklist:
+                    nicklist[reciever.lower()].enviar(b':%s PRIVMSG %s :%s\r\n' % (conexao.nick, reciever, msg))
+
+
+            if dado.startswith(b'JOIN'):
+                canal = dado[len(b'JOIN '):]
+                canal = canal[:-len(b'\r\n')] 
+                
+                if validar_nome(canal.replace(b'#', b'')) and canal.startswith(b'#'):
+                    canal = canal[len(b'#'):]
+                    
+                    if canal.lower() not in canais:
+                        canais[canal.lower()] = []
+                    
+                    if conexao not in canais[canal.lower()]:
+                        canais[canal.lower()].append(conexao)
+                        
+                        for membro in canais[canal.lower()]:
+                            membro.enviar(b':%s JOIN :%s\r\n' % (conexao.nick, b'#' + canal))
+                    
+                    if canal.lower() not in conexao.canais:
+                        conexao.canais.append(canal.lower())
+                        
+                    membros_canal = [membro.nick for membro in canais[canal.lower()]]
+                    membros_canal = b' '.join(sorted(membros_canal))
+                    
+                    conexao.enviar(b':server 353 %s = %s :%s\r\n' % (conexao.nick, b'#' + canal, membros_canal))
+                    conexao.enviar(b':server 366 %s %s :End of /NAMES list.\r\n' % (conexao.nick, b'#' + canal))
+                
+                else:
+                    conexao.enviar(b':server 403 canal :No such channel\r\n')
+
+
+            if dado.startswith(b'PART'):
+                
+                canal = dado[len(b'PART '):]
+                canal = canal[:-len(b'\r\n')]
+                canal = canal.split(b' :', 1)[0]
+                
+ 
+                if canal.startswith(b'#'):
+                    canal = canal[len(b'#'):]
+                    
+                    if canal.lower() in canais:
+                    
+                        if canal.lower() in conexao.canais:
+                        
+                            for membro in canais[canal.lower()]:
+                                membro.enviar(b':%s PART %s\r\n' % (conexao.nick, b'#' + canal))
+
+                            canais[canal.lower()].remove(conexao)
+                            conexao.canais.remove(canal.lower())
+        
+        
+            print(conexao, dado)
+            
+            conexao.aux = b''
+            
+        else:
+            conexao.aux += dado
+
     
-    print(conexao, dados)
+    if conexao.aux.endswith(b'\r\n'):
+        conexao.enviar(b':server PONG server :' + conexao.aux[len(b'PING '):])
+        conexao.aux = b''
+        
+        print(conexao, dado)
+
 
 
 def conexao_aceita(conexao):
-    print(conexao, 'nova conexão')
+
+    conexao.aux = b''
+    conexao.nick = b''
+    conexao.canais = []
     conexao.registrar_recebedor(dados_recebidos)
-
-
+    
 servidor = Servidor(6667)
 servidor.registrar_monitor_de_conexoes_aceitas(conexao_aceita)
 asyncio.get_event_loop().run_forever()
