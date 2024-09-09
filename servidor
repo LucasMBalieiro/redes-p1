@@ -10,21 +10,94 @@ canais = {}
 def validar_nome(nome):
     return re.match(br'^[a-zA-Z][a-zA-Z0-9_-]*$', nome) is not None
 
-    
-def sair(conexao):
 
-    if hasattr(conexao, 'canais'):
-        for canal in conexao.canais:
-            if conexao in canais[canal.lower()]:
-                canais[canal.lower()].remove(conexao)
-            
+# Handle Nick
+def handle_nick_invalido(conexao, nick):
+    conexao.enviar(b':server 432 * %s :Erroneous nickname\r\n' % nick)
+
+def handle_nick_uso(conexao, nick):
+    if conexao.nick == b'':
+        conexao.enviar(b':server 433 * %s :Nickname is already in use\r\n' % nick)
+    else:
+        conexao.enviar(b':server 433 %s %s :Nickname is already in use\r\n' % (conexao.nick, nick))
+
+def handle_nick_novo(conexao, nick, nicklist):
+    if conexao.nick == b'':
+        conexao.enviar(b':server 001 %s :Welcome\r\n' % nick)
+        conexao.enviar(b':server 422 %s :MOTD File is missing\r\n' % nick)
+    else:
+        conexao.enviar(b':%s NICK %s\r\n' % (conexao.nick, nick))
+        del nicklist[conexao.nick.lower()]
+
+    nicklist[nick.lower()] = conexao
+    conexao.nick = nick
+
+# Handle PRIVMSG
+def handle_privmsg_canal(conexao, canal, msg, canais):
+    canal_lower = canal.lower()
+    if conexao in canais.get(canal_lower, []):
+        for membro in canais[canal_lower]:
+            if membro != conexao:
+                membro.enviar(b':%s PRIVMSG %s :%s\r\n' % (conexao.nick, b'#' + canal, msg))
+
+def handle_privmsg_user(conexao, reciever, msg, nicklist):
+    reciever_lower = reciever.lower()
+    if reciever_lower in nicklist:
+        nicklist[reciever_lower].enviar(b':%s PRIVMSG %s :%s\r\n' % (conexao.nick, reciever, msg))
+
+
+# Handle Join
+def handle_join_canal_invalido(conexao):
+    conexao.enviar(b':server 403 canal :No such channel\r\n')
+
+def handle_join_canal(conexao, canal, canais):
+    canal_lower = canal.lower()
+    
+    if canal_lower not in canais:
+        canais[canal_lower] = []
+
+    if conexao not in canais[canal_lower]:
+        canais[canal_lower].append(conexao)
+        
+        join_message = b':%s JOIN :%s\r\n' % (conexao.nick, b'#' + canal)
+        for membro in canais[canal_lower]:
+            membro.enviar(join_message)
+
+    if canal_lower not in conexao.canais:
+        conexao.canais.append(canal_lower)
+
+    membros_canal = b' '.join(sorted(membro.nick for membro in canais[canal_lower]))
+    conexao.enviar(b':server 353 %s = %s :%s\r\n' % (conexao.nick, b'#' + canal, membros_canal))
+    conexao.enviar(b':server 366 %s %s :End of /NAMES list.\r\n' % (conexao.nick, b'#' + canal))
+
+
+#Handle Part
+def handle_part(conexao, canal, canais):
+    canal_lower = canal.lower()
+
+    if canal_lower in canais and canal_lower in conexao.canais:
+        part_message = b':%s PART %s\r\n' % (conexao.nick, b'#' + canal)
+        for membro in canais[canal_lower]:
+            membro.enviar(part_message)
+
+        canais[canal_lower].remove(conexao)
+        conexao.canais.remove(canal_lower)
+
+
+def sair(conexao):
+    canais_usuario = conexao.canais.copy() 
+    for canal in canais_usuario:
+        if conexao in canais.get(canal.lower(), []):
+            canais[canal.lower()].remove(conexao)
+            mensagem_saida = b':%s QUIT :Connection closed\r\n' % conexao.nick
             for membro in canais[canal.lower()]:
-                membro.enviar(b':%s QUIT :Connection closed\r\n' % conexao.nick)
-            
-    if conexao.nick.lower() != b'':
+                membro.enviar(mensagem_saida)
+    
+    if conexao.nick.lower() in nicklist:
         del nicklist[conexao.nick.lower()]
 
     conexao.fechar()
+
     
 
 def dados_recebidos(conexao, dados):
@@ -36,7 +109,9 @@ def dados_recebidos(conexao, dados):
         \r\n
         )
     ''', re.VERBOSE)
-    dados = [substring for substring in re.split(separador, dados)]
+    dados = re.split(separador, dados)
+    dados = list(filter(None, dados))
+
     
     
     for dado in dados:
@@ -50,101 +125,44 @@ def dados_recebidos(conexao, dados):
 
 
             if dado.startswith(b'NICK'):
-                
-                nick = dado[len(b'NICK '):]
-                nick = nick[:-len(b'\r\n')]
-                
-                if validar_nome(nick):
+                nick = dado[len(b'NICK '):-len(b'\r\n')]
 
-                    if nick.lower() in nicklist:
-                        
-                        if conexao.nick == b'':
-                            conexao.enviar(b':server 433 * %s :Nickname is already in use\r\n' % nick)
-                        
-                        else:
-                            conexao.enviar(b':server 433 %s %s :Nickname is already in use\r\n' % (conexao.nick, nick))
-                      
-                    else:
-                        if conexao.nick == b'':
-                            conexao.enviar(b':server 001 %s :Welcome\r\n' % nick)
-                            conexao.enviar(b':server 422 %s :MOTD File is missing\r\n' % nick)
-                            
-                        else:
-                            conexao.enviar(b':%s NICK %s\r\n' % (conexao.nick, nick))
-                            del nicklist[conexao.nick.lower()]
-                        
-                        nicklist[nick.lower()] = conexao
-                        conexao.nick = nick
-
+                if not validar_nome(nick):
+                    handle_nick_invalido(conexao, nick)
+                elif nick.lower() in nicklist:
+                    handle_nick_uso(conexao, nick)
                 else:
-                    conexao.enviar(b':server 432 * %s :Erroneous nickname\r\n' % nick)
-                    
-                    
+                    handle_nick_novo(conexao, nick, nicklist)
+
+
             if dado.startswith(b'PRIVMSG'):
-                privmsg = dado[len(b'PRIVMSG '):]
-                privmsg = privmsg[:-len(b'\r\n')] 
+                privmsg = dado[len(b'PRIVMSG '):-len(b'\r\n')]
                 reciever, msg = privmsg.split(b' :', 1)
-                
-                
+
                 if reciever.startswith(b'#'):
                     canal = reciever[len(b'#'):]
-                    
-                    if conexao in canais[canal.lower()]:
-                        for membro in canais[canal.lower()]:
-                            if membro != conexao:
-                                membro.enviar(b':%s PRIVMSG %s :%s\r\n' % (conexao.nick, b'#' + canal, msg))
-                elif reciever.lower() in nicklist:
-                    nicklist[reciever.lower()].enviar(b':%s PRIVMSG %s :%s\r\n' % (conexao.nick, reciever, msg))
+                    handle_privmsg_canal(conexao, canal, msg, canais)
+                else:
+                    handle_privmsg_user(conexao, reciever, msg, nicklist)
 
 
             if dado.startswith(b'JOIN'):
-                canal = dado[len(b'JOIN '):]
-                canal = canal[:-len(b'\r\n')] 
-                
+                canal = dado[len(b'JOIN '):-len(b'\r\n')]
+
                 if validar_nome(canal.replace(b'#', b'')) and canal.startswith(b'#'):
                     canal = canal[len(b'#'):]
-                    
-                    if canal.lower() not in canais:
-                        canais[canal.lower()] = []
-                    
-                    if conexao not in canais[canal.lower()]:
-                        canais[canal.lower()].append(conexao)
-                        
-                        for membro in canais[canal.lower()]:
-                            membro.enviar(b':%s JOIN :%s\r\n' % (conexao.nick, b'#' + canal))
-                    
-                    if canal.lower() not in conexao.canais:
-                        conexao.canais.append(canal.lower())
-                        
-                    membros_canal = [membro.nick for membro in canais[canal.lower()]]
-                    membros_canal = b' '.join(sorted(membros_canal))
-                    
-                    conexao.enviar(b':server 353 %s = %s :%s\r\n' % (conexao.nick, b'#' + canal, membros_canal))
-                    conexao.enviar(b':server 366 %s %s :End of /NAMES list.\r\n' % (conexao.nick, b'#' + canal))
-                
+                    handle_join_canal(conexao, canal, canais)
                 else:
-                    conexao.enviar(b':server 403 canal :No such channel\r\n')
+                    handle_join_canal_invalido(conexao)
 
 
             if dado.startswith(b'PART'):
-                
-                canal = dado[len(b'PART '):]
-                canal = canal[:-len(b'\r\n')]
+                canal = dado[len(b'PART '):-len(b'\r\n')]
                 canal = canal.split(b' :', 1)[0]
-                
- 
+
                 if canal.startswith(b'#'):
                     canal = canal[len(b'#'):]
-                    
-                    if canal.lower() in canais:
-                    
-                        if canal.lower() in conexao.canais:
-                        
-                            for membro in canais[canal.lower()]:
-                                membro.enviar(b':%s PART %s\r\n' % (conexao.nick, b'#' + canal))
-
-                            canais[canal.lower()].remove(conexao)
-                            conexao.canais.remove(canal.lower())
+                    handle_part(conexao, canal, canais)
         
         
             print(conexao, dado)
